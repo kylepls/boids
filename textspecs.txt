@@ -1,0 +1,33 @@
+==== Windows Environment ====
+~$ ./wglinfo64.exe  | grep "OpenGL"
+[WGL] OpenGL vendor string: NVIDIA Corporation
+[WGL] OpenGL renderer string: GeForce RTX 2060/PCIe/SSE2
+[WGL] OpenGL version string: 4.6.0 NVIDIA 457.09
+[WGL] OpenGL shading language version string: 4.60 NVIDIA
+[WGL] OpenGL GPU memory: 6144 MiB
+[WGL] OpenGL extensions:
+[WGL] OpenGL (core profile) vendor string: NVIDIA Corporation
+[WGL] OpenGL (core profile) renderer string: GeForce RTX 2060/PCIe/SSE2
+[WGL] OpenGL (core profile) version string: 4.6.0 NVIDIA 457.09
+[WGL] OpenGL (core profile) shading language version string: 4.60 NVIDIA
+[WGL] OpenGL (core profile) extensions:
+[WGL] OpenGL (software) vendor string: Microsoft Corporation
+[WGL] OpenGL (software) renderer string: GDI Generic
+[WGL] OpenGL (software) version string: 1.1.0
+
+==== Ubuntu 20.04 LTS Environment ====
+OpenGL vendor string: Intel
+OpenGL renderer string: Mesa Intel(R) HD Graphics 620 (KBL GT2)
+OpenGL core profile version string: 4.6 (Core Profile) Mesa 20.0.8
+OpenGL core profile shading language version string: 4.60
+OpenGL core profile context flags: (none)
+OpenGL core profile profile mask: core profile
+OpenGL core profile extensions:
+OpenGL version string: 4.6 (Compatibility Profile) Mesa 20.0.8
+OpenGL shading language version string: 4.60
+OpenGL context flags: (none)
+OpenGL profile mask: compatibility profile
+OpenGL extensions:
+OpenGL ES profile version string: OpenGL ES 3.2 Mesa 20.0.8
+OpenGL ES profile shading language version string: OpenGL ES GLSL ES 3.20
+

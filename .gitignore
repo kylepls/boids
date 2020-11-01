@@ -1,0 +1,5 @@
+cmake-build-debug
+*.a
+*.o
+*.exe
+.idea

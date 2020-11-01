@@ -1,0 +1,331 @@
+#version 430 compatibility
+#extension GL_ARB_compute_shader : enable
+#extension GL_ARB_shader_storage_buffer_object : enable
+#extension GL_EXT_gpu_shader4 : enable
+
+#define PI 3.141592653
+#define octaves 8
+
+struct Data {
+    vec3 dir;
+    vec3 openVelocity;
+    vec3 pos;
+    float dist;
+};
+
+uniform float iso_level;
+uniform float persistence;
+uniform float lacunarity;
+uniform float weight_multiplier;
+uniform float noise_offset;
+uniform float octave_offsets[100];
+uniform float noise_scale;
+uniform isampler2D marching_lookup_table;
+uniform float world_scale;
+
+const int num_pts = 20;
+
+layout(std140, binding=4) buffer Input {
+    Data InputData[];
+};
+
+layout (local_size_x=1, local_size_y=1, local_size_z=1) in;
+
+//	Simplex 3D Noise
+//	by Ian McEwan, Ashima Arts
+vec4 permute(vec4 x){ return mod(((x*34.0)+1.0)*x, 289.0); }
+vec4 taylorInvSqrt(vec4 r){ return 1.79284291400159 - 0.85373472095314 * r; }
+
+float noise(vec3 v){
+    const vec2  C = vec2(1.0/6.0, 1.0/3.0);
+    const vec4  D = vec4(0.0, 0.5, 1.0, 2.0);
+
+    // First corner
+    vec3 i  = floor(v + dot(v, C.yyy));
+    vec3 x0 =   v - i + dot(i, C.xxx);
+
+    // Other corners
+    vec3 g = step(x0.yzx, x0.xyz);
+    vec3 l = 1.0 - g;
+    vec3 i1 = min(g.xyz, l.zxy);
+    vec3 i2 = max(g.xyz, l.zxy);
+
+    //  x0 = x0 - 0. + 0.0 * C
+    vec3 x1 = x0 - i1 + 1.0 * C.xxx;
+    vec3 x2 = x0 - i2 + 2.0 * C.xxx;
+    vec3 x3 = x0 - 1. + 3.0 * C.xxx;
+
+    // Permutations
+    i = mod(i, 289.0);
+    vec4 p = permute(permute(permute(
+    i.z + vec4(0.0, i1.z, i2.z, 1.0))
+    + i.y + vec4(0.0, i1.y, i2.y, 1.0))
+    + i.x + vec4(0.0, i1.x, i2.x, 1.0)
+    );
+
+    // Gradients
+    // ( N*N points uniformly over a square, mapped onto an octahedron.)
+    float n_ = 1.0/7.0;// N=7
+    vec3  ns = n_ * D.wyz - D.xzx;
+
+    vec4 j = p - 49.0 * floor(p * ns.z *ns.z);//  mod(p,N*N)
+
+    vec4 x_ = floor(j * ns.z);
+    vec4 y_ = floor(j - 7.0 * x_);// mod(j,N)
+
+    vec4 x = x_ *ns.x + ns.yyyy;
+    vec4 y = y_ *ns.x + ns.yyyy;
+    vec4 h = 1.0 - abs(x) - abs(y);
+
+    vec4 b0 = vec4(x.xy, y.xy);
+    vec4 b1 = vec4(x.zw, y.zw);
+
+    vec4 s0 = floor(b0)*2.0 + 1.0;
+    vec4 s1 = floor(b1)*2.0 + 1.0;
+    vec4 sh = -step(h, vec4(0.0));
+
+    vec4 a0 = b0.xzyw + s0.xzyw*sh.xxyy;
+    vec4 a1 = b1.xzyw + s1.xzyw*sh.zzww;
+
+    vec3 p0 = vec3(a0.xy, h.x);
+    vec3 p1 = vec3(a0.zw, h.y);
+    vec3 p2 = vec3(a1.xy, h.z);
+    vec3 p3 = vec3(a1.zw, h.w);
+
+    //Normalise gradients
+    vec4 norm = taylorInvSqrt(vec4(dot(p0, p0), dot(p1, p1), dot(p2, p2), dot(p3, p3)));
+    p0 *= norm.x;
+    p1 *= norm.y;
+    p2 *= norm.z;
+    p3 *= norm.w;
+
+    // Mix final noise value
+    vec4 m = max(0.6 - vec4(dot(x0, x0), dot(x1, x1), dot(x2, x2), dot(x3, x3)), 0.0);
+    m = m * m;
+    return 42.0 * dot(m*m, vec4(dot(p0, x0), dot(p1, x1), dot(p2, x2), dot(p3, x3)));
+}
+float density(vec4 P) {
+    if (P.y < 1) {
+        return 0;
+    }
+
+    float computeNoise = 0;
+    vec4 localOffset = vec4(0, 20, 0, 0);
+
+    float frequency = noise_scale / 100;
+    float amplitude = 1;
+    float weight = 1;
+    for (int j = 0; j < octaves; j++) {
+        vec4 N = P * frequency + octave_offsets[j] + noise_offset + localOffset;
+        float n = noise(N.xyz);
+        float v = 1 - abs(n);
+        v = v * v;
+        v *= weight;
+        weight = max(min(v * weight_multiplier, 1), 0);
+        computeNoise += v * amplitude;
+        amplitude *= persistence;
+        frequency *= lacunarity;
+    }
+
+    float finalVal = -(20 - P.y) + computeNoise * weight_multiplier + mod(P.y, 5);
+
+    return finalVal;
+}
+
+const int cornerIndexAFromEdge[12] = int[](0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3);
+const int cornerIndexBFromEdge[12] = int[](1, 2, 3, 0, 5, 6, 7, 4, 4, 5, 6, 7);
+
+const vec3 deltas[8] = vec3[](
+vec3(0, 0, 0),
+vec3(1, 0, 0),
+vec3(1, 0, 1),
+vec3(0, 0, 1),
+vec3(0, 1, 0),
+vec3(1, 1, 0),
+vec3(1, 1, 1),
+vec3(0, 1, 1)
+);
+
+int triTableValue(int i, int j){
+    return texelFetch2D(marching_lookup_table, ivec2(j, i), 0).a;
+}
+
+vec4 lerp(vec4 v1, vec4 v2) {
+    float t = (iso_level-v1.w)/(v2.w-v1.w);
+    return vec4(mix(v1, v2, t).xyz, 1);
+}
+
+vec4 getCubePoint(vec4 origin, vec3 offset) {
+    vec3 P = origin.xyz + (offset*world_scale);
+    return vec4(P, density(vec4(P, 1)));
+}
+
+vec4 relativeTo(vec3 P, vec3 V, vec3 O) {
+    vec3 T = normalize(V);
+    vec3 Y = vec3(0, 1, 0);
+    vec3 L = normalize(cross(T, Y));
+    vec3 U = normalize(cross(L, T));
+    return vec4((L*O.x) + (T*O.y) + (U*O.z) + P, 1);
+}
+
+float intersects(vec3 A, vec3 B, vec3 C, vec3 S, vec3 D) {
+    vec3 N = normalize(cross(A-B, B-C));
+    if (dot(N, D) > 0) {
+        N = -N;
+    }
+
+    float t = dot(N, A-S)/dot(N, D);
+
+    if (abs(dot(N, D)) > 0.001 && t > 0) {
+        vec3 PlanePoint = S + D*t;
+
+        bvec3 dots = bvec3(
+        dot(normalize(cross(B-A, PlanePoint-A)), N) > 0,
+        dot(normalize(cross(C-B, PlanePoint-B)), N) > 0,
+        dot(normalize(cross(A-C, PlanePoint-C)), N) > 0
+        );
+
+        if (all(dots)) {
+            return length(D*t);
+        }
+    }
+    return 1000;
+}
+
+float findIntersection(vec4 S, vec4 D, vec4 cube) {
+    vec4 cubePoint = floor(cube);
+    vec4 cubeCorners[8];
+    for (int i = 0; i < 8; i++) {
+        vec3 P = (deltas[i] * world_scale) + cubePoint.xyz;
+        cubeCorners[i] = vec4(P, density(vec4(P, 1)));
+    }
+
+    int cubeIndex = 0;
+    if (cubeCorners[0].w < iso_level) cubeIndex |= 1;
+    if (cubeCorners[1].w < iso_level) cubeIndex |= 2;
+    if (cubeCorners[2].w < iso_level) cubeIndex |= 4;
+    if (cubeCorners[3].w < iso_level) cubeIndex |= 8;
+    if (cubeCorners[4].w < iso_level) cubeIndex |= 16;
+    if (cubeCorners[5].w < iso_level) cubeIndex |= 32;
+    if (cubeCorners[6].w < iso_level) cubeIndex |= 64;
+    if (cubeCorners[7].w < iso_level) cubeIndex |= 128;
+
+    for (int i = 0; triTableValue(cubeIndex, i) != -1; i += 3) {
+        int a0 = cornerIndexAFromEdge[triTableValue(cubeIndex, i)];
+        int b0 = cornerIndexBFromEdge[triTableValue(cubeIndex, i)];
+
+        int a1 = cornerIndexAFromEdge[triTableValue(cubeIndex, i+1)];
+        int b1 = cornerIndexBFromEdge[triTableValue(cubeIndex, i+1)];
+
+        int a2 = cornerIndexAFromEdge[triTableValue(cubeIndex, i+2)];
+        int b2 = cornerIndexBFromEdge[triTableValue(cubeIndex, i+2)];
+
+        vec4 A = lerp(cubeCorners[a0], cubeCorners[b0]);
+        vec4 B = lerp(cubeCorners[a1], cubeCorners[b1]);
+        vec4 C = lerp(cubeCorners[a2], cubeCorners[b2]);
+
+        float distance = intersects(A.xyz, B.xyz, C.xyz, S.xyz, D.xyz);
+        if (distance < 2) {
+            return distance;
+        }
+    }
+    return 1000;
+}
+
+int sign0(float x) {
+    return x > 0 ? 1 : 0;
+}
+
+float nearestObstruction(vec4 origin, vec3 direction) {
+    direction = normalize(direction);
+    float X = floor(origin.x);
+    float Y = floor(origin.y);
+    float Z = floor(origin.z);
+
+    vec3 step = sign(direction);
+
+    float tDeltaX = direction.x != 0 ? 1/abs(direction.x) : 1e4;
+    float tDeltaY = direction.y != 0 ? 1/abs(direction.y) : 1e4;
+    float tDeltaZ = direction.z != 0 ? 1/abs(direction.z) : 1e4;
+
+    float tMaxX = direction.x != 0 ? (sign0(direction.x) + sign(direction.x) * (X-origin.x)) * tDeltaX : 1e4;
+    float tMaxY = direction.y != 0 ? (sign0(direction.y) + sign(direction.y) * (Y-origin.y)) * tDeltaY : 1e4;
+    float tMaxZ = direction.z != 0 ? (sign0(direction.z) + sign(direction.z) * (Z-origin.z)) * tDeltaZ : 1e4;
+
+    float distance = findIntersection(origin, vec4(direction, 1), floor(vec4(X, Y, Z, 1)));
+    if (distance < 2) {
+        return distance;
+    }
+    const int max_i = 3;
+    for (int i = 0; i < max_i; i++) {
+        if (tMaxX < tMaxY){
+            if (tMaxX < tMaxZ) {
+                X += step.x;
+                tMaxX += tDeltaX;
+            } else {
+                Z += step.z;
+                tMaxZ += tDeltaZ;
+            }
+        } else {
+            if (tMaxY < tMaxZ) {
+                Y += step.y;
+                tMaxY += tDeltaY;
+            } else {
+                Z += step.z;
+                tMaxZ += tDeltaZ;
+            }
+        }
+
+        float distance = findIntersection(origin, vec4(direction, 1), floor(vec4(X, Y, Z, 1)));
+        if (distance < 2) {
+            return distance;
+        }
+    }
+
+    return 1000;
+}
+
+void main() {
+
+    uint gid = gl_GlobalInvocationID.x;
+    vec4 origin = vec4(InputData[gid].pos, 1);
+
+    vec4 maxOpenSpaceDelta = vec4(0);
+    float maxOpenSpace = -1;
+    int t;
+
+    for (t = 0; t < num_pts; t++) {
+        vec3 delta;
+        if (t == 0) {
+            delta = vec3(0, 1, 0);
+        } else {
+            float index = t + 0.5;
+            float phi = acos(1.0 - 2.0 * index / num_pts);
+            float theta = PI * (1.0 + pow(5.0, 0.5)) * index;
+            delta = vec3(cos(theta) * sin(phi), cos(phi), -sin(theta) * sin(phi));
+        }
+
+        vec4 absWorldPos = relativeTo(origin.xyz, InputData[gid].dir, delta);
+        vec4 worldDelta = normalize(absWorldPos - origin);
+        float nearest = nearestObstruction(origin, worldDelta.xyz);
+
+        if (nearest > maxOpenSpace) {
+            maxOpenSpace = nearest;
+            maxOpenSpaceDelta = worldDelta;
+        }
+        if (t == 0) {
+            InputData[gid].dist = nearest;
+        }
+
+        if (nearest > 2) {
+            break;
+        }
+    }
+
+    if (t > 0) {
+        InputData[gid].openVelocity = maxOpenSpaceDelta.xyz;
+    } else {
+        InputData[gid].openVelocity = vec4(0, 0, 0, 0).xyz;
+    }
+}
+
